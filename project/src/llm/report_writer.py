@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.models import CveRecord, ReportSection, SimilarityFinding
+from src.models import CveRecord, LlmJudgment, ReportSection, SimilarityFinding
 
 
 def draft_report(keyword: str, records: list[CveRecord]) -> str:
@@ -23,6 +23,8 @@ def draft_similarity_report(
     findings: list[SimilarityFinding],
     source_count: int,
     pattern_count: int,
+    llm_judgments: list[LlmJudgment] | None = None,
+    llm_model: str | None = None,
 ) -> str:
     """Generate a vulnerability prediction report from similarity findings."""
 
@@ -33,9 +35,11 @@ def draft_similarity_report(
         ),
         ReportSection("예측 요약", _prediction_summary(findings)),
         ReportSection("유사도 기반 취약 후보", _finding_table(findings)),
-        ReportSection("근거 CVE", _cve_table(records[:10])),
         ReportSection("해석 방법", _interpretation()),
     ]
+    if llm_judgments:
+        sections.insert(3, ReportSection("LLM 재판단", _llm_judgment_table(llm_judgments, llm_model)))
+    sections.insert(-1, ReportSection("근거 CVE", _cve_table(records[:10])))
     return "\n\n".join(f"## {section.title}\n\n{section.body}" for section in sections)
 
 
@@ -97,6 +101,26 @@ def _finding_table(findings: list[SimilarityFinding]) -> str:
     return "\n".join(lines)
 
 
+def _llm_judgment_table(judgments: list[LlmJudgment], model: str | None) -> str:
+    model_line = f"모델: `{model}`\n\n" if model else ""
+    lines = [
+        "| 후보 | GPT 위험도 | 신뢰도 | 판단 근거 | 확인 방법 | 권장 조치 |",
+        "| ---: | --- | ---: | --- | --- | --- |",
+    ]
+    for judgment in judgments:
+        confidence = f"{judgment.confidence:.2f}" if judgment.confidence is not None else "N/A"
+        lines.append(
+            "| "
+            f"{judgment.finding_index} | "
+            f"{_clean_cell(judgment.risk)} | "
+            f"{confidence} | "
+            f"{_clean_cell(judgment.rationale)} | "
+            f"{_clean_cell(judgment.verification_steps)} | "
+            f"{_clean_cell(judgment.recommended_fix)} |"
+        )
+    return model_line + "\n".join(lines)
+
+
 def _risk_label(similarity: float) -> str:
     if similarity >= 0.45:
         return "높음"
@@ -110,3 +134,7 @@ def _interpretation() -> str:
         "이 결과는 확정 진단이 아니라, 이미 제보된 취약 코드 또는 CVE 설명과의 유사도를 이용한 우선순위 후보입니다. "
         "상위 후보부터 입력 검증, 경계값 검사, 메모리 크기 계산, 인증/세션 처리, 인코딩/디코딩 흐름을 수동 검토하세요."
     )
+
+
+def _clean_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\r", " ").replace("\n", "<br>").strip() or "N/A"

@@ -67,3 +67,18 @@ class SimilarityFinding:
     similarity: float
     matched_terms: tuple[str, ...]
     reason: str
+
+
+@dataclass(frozen=True)
+class LlmJudgment:
+    """LLM review result for one similarity finding."""
+
+    finding_index: int
+    risk: str
+    confidence: float | None
+    rationale: str
+    attack_conditions: str
+    verification_steps: str
+    recommended_fix: str
+    false_positive_notes: str
+    raw_response: str
