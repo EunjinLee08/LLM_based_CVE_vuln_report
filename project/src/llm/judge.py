@@ -4,76 +4,60 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.error import URLError
-from urllib.request import Request, urlopen
-
+import os
 from src.models import LlmJudgment, SimilarityFinding
 
 
 def judge_findings_with_llm(
     findings: list[SimilarityFinding],
-    provider: str,
     model: str,
     max_findings: int,
-    ollama_url: str = "http://localhost:11434",
+    api_key: str,
+    base_url: str,
 ) -> list[LlmJudgment]:
-    """Ask an LLM provider to review the highest-ranked similarity findings."""
 
     if max_findings <= 0 or not findings:
         return []
 
-    provider = provider.lower()
     judgments: list[LlmJudgment] = []
+
     for index, finding in enumerate(findings[:max_findings], start=1):
         prompt = _build_judgment_prompt(index, finding)
-        if provider == "openai":
-            raw_response = _call_openai(model, prompt)
-        elif provider == "ollama":
-            raw_response = _call_ollama(model, prompt, ollama_url)
-        else:
-            raise ValueError(f"Unsupported LLM provider: {provider}")
+        raw_response = _call_openai(
+            model=model,
+            prompt=prompt,
+            api_key=api_key,
+            base_url=base_url,
+        )
         judgments.append(_parse_judgment(index, raw_response))
     return judgments
 
 
-def _call_openai(model: str, prompt: str) -> str:
+def _call_openai(model: str, prompt: str, api_key: str, base_url: str) -> str:
     try:
         from openai import OpenAI
     except ImportError as error:
         raise RuntimeError("OpenAI SDK is not installed. Run: pip install openai") from error
 
-    response = OpenAI().responses.create(model=model, input=prompt)
-    return response.output_text
-
-
-def _call_ollama(model: str, prompt: str, ollama_url: str) -> str:
-    url = ollama_url.rstrip("/") + "/api/generate"
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.1},
-    }
-    request = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
     )
-    try:
-        with urlopen(request, timeout=180) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except URLError as error:
-        raise RuntimeError(
-            f"Could not connect to Ollama at {ollama_url}. "
-            "Start Ollama and run: ollama pull qwen2.5-coder"
-        ) from error
 
-    raw_response = data.get("response")
-    if not isinstance(raw_response, str):
-        raise RuntimeError("Ollama returned an unexpected response payload.")
-    return raw_response
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.1,
+    )
+
+    content = response.choices[0].message.content
+
+    if not content:
+        raise RuntimeError("LLM returned an empty response.")
+    
+    return response.choices[0].message.content
 
 
 def _build_judgment_prompt(index: int, finding: SimilarityFinding) -> str:

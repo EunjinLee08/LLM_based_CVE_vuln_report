@@ -51,16 +51,22 @@ def _run() -> None:
 
     if args.source_dir or args.github_url:
         if args.github_url:
-            source_files = GitHubWebCollector().fetch_from_url(args.github_url, max_files=args.github_max_files)
+            source_files = GitHubWebCollector().fetch_from_url(
+                args.github_url,
+                max_files=args.github_max_files,
+            )
         else:
             source_files = load_source_files(Path(args.source_dir))
+
         if not source_files:
             raise ValueError(
-                "No source files found to analyze. Check --source-dir or --github-url. "
+                "No source files found to analyze.\n"
+                "Check --source-dir or --github-url.\n"
                 "Supported source extensions include .c, .h, .cpp, .py, .js, .ts, .java, .php, .go, .rs, and .rb."
             )
 
         patterns = patterns_from_cves(ranked_records)
+
         if args.vuln_code_dir:
             patterns = patterns_from_code_dir(Path(args.vuln_code_dir)) + patterns
 
@@ -70,20 +76,17 @@ def _run() -> None:
             threshold=args.threshold,
             max_findings=args.max_findings,
         )
-        llm_judgments = []
-        if args.use_llm:
-            if args.llm_provider == "openai" and not settings.openai_api_key:
-                raise ValueError("OPENAI_API_KEY is required when --use-llm is set.")
-            llm_model = _resolve_llm_model(args, settings)
-            llm_judgments = judge_findings_with_llm(
-                findings=findings,
-                provider=args.llm_provider,
-                model=llm_model,
-                max_findings=args.llm_max_findings,
-                ollama_url=settings.ollama_url,
-            )
-        else:
-            llm_model = None
+
+        if not settings.mindlogic_api_key:
+            raise ValueError("MINDLOGIC_API_KEY is required.")
+
+        llm_judgments = judge_findings_with_llm(
+            findings=findings,
+            model=settings.mindlogic_model,
+            max_findings=settings.llm_max_findings,
+            api_key=settings.mindlogic_api_key,
+            base_url=settings.mindlogic_base_url,
+        )
 
         report = draft_similarity_report(
             keyword,
@@ -92,10 +95,10 @@ def _run() -> None:
             len(source_files),
             len(patterns),
             llm_judgments=llm_judgments,
-            llm_model=llm_model,
+            llm_model=settings.mindlogic_model,
         )
-        validate_report(report)
 
+        validate_report(report)
         output_path = _write_report(settings.output_dir, f"{keyword}_similarity", report)
         print(f"Similarity report written: {output_path}")
         return
@@ -118,11 +121,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vuln-code-dir", help="Directory of previously reported vulnerable code samples")
     parser.add_argument("--threshold", type=float, default=0.18, help="Minimum similarity score for candidates")
     parser.add_argument("--max-findings", type=int, default=20, help="Maximum vulnerable-code candidates to report")
-    parser.add_argument("--use-llm", action="store_true", help="Ask an LLM to review top similarity findings")
-    parser.add_argument("--llm-provider", choices=("ollama", "openai"), default="ollama", help="LLM provider for --use-llm")
-    parser.add_argument("--llm-model", help="LLM model for --use-llm")
-    parser.add_argument("--openai-model", help="Deprecated alias for --llm-model with --llm-provider openai")
-    parser.add_argument("--llm-max-findings", type=int, default=5, help="Maximum top findings to send to the LLM")
     parser.add_argument("--github-url", help="Analyze source file(s) by GitHub web/raw URL without cloning")
     parser.add_argument("--github-max-files", type=int, default=20, help="Maximum files to fetch from a repo/tree URL")
     parser.add_argument("--save-sources", action="store_true", help="Only save fetched GitHub source files instead of analyzing them")
@@ -157,16 +155,6 @@ def _infer_keyword_from_github_url(github_url: str | None) -> str | None:
         return repo.replace("-", " ").replace("_", " ").strip() or None
 
     return None
-
-
-def _resolve_llm_model(args: argparse.Namespace, settings: Settings) -> str:
-    if args.llm_model:
-        return args.llm_model
-    if args.openai_model:
-        return args.openai_model
-    if args.llm_provider == "openai":
-        return settings.openai_model
-    return settings.ollama_model
 
 
 if __name__ == "__main__":
