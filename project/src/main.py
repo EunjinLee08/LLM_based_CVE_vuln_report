@@ -6,7 +6,12 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
-
+from src.retrieval.c_code_patterns import (
+    collect_family_queries,
+    scan_c_code_path,
+    scan_c_source_texts,
+    summarize_families,
+)
 from src.collectors import GitHubWebCollector, NvdCollector
 from src.config import Settings
 from src.llm import build_report_prompt, draft_report, draft_similarity_report, judge_findings_with_llm
@@ -69,6 +74,49 @@ def _run() -> None:
                 "Supported source extensions include .c, .h, .cpp, .py, .js, .ts, .java, .php, .go, .rs, and .rb."
             )
 
+        c_pattern_findings = []
+
+        if args.github_url:
+            c_pattern_findings = scan_c_source_texts(source_files)
+        elif args.source_dir:
+            c_pattern_findings = scan_c_code_path(Path(args.source_dir))
+
+        if c_pattern_findings:
+            print("[+] Static C pattern evidence found:")
+            for family, count in summarize_families(c_pattern_findings).items():
+                print(f"    - {family}: {count}")
+
+            extra_queries = collect_family_queries(c_pattern_findings)
+
+            # debug
+            print("[+] Augmented NVD queries:")
+            for query in extra_queries:
+                print(f"    - {query}")
+
+            extra_records = []
+            for query in extra_queries:
+                payload = NvdCollector(settings.nvd_api_key).search(
+                    query,
+                    args.limit or settings.max_results,
+                )
+                term_records = parse_nvd_payload(payload)
+
+                # debug
+                                # debug
+                print(f"[+] NVD results for '{query}': {len(term_records)}")
+                for record in term_records[:5]:
+                    text = getattr(record, "description", None) or getattr(record, "summary", "")
+                    print(f"    - {record.cve_id}: {text[:80]}")
+
+                extra_records.extend(term_records)
+
+            # CVE ID 기준 중복 제거
+            merged = {record.cve_id: record for record in ranked_records}
+            for record in extra_records:
+                merged.setdefault(record.cve_id, record)
+
+            ranked_records = list(merged.values())
+
         patterns = []
 
         if args.vuln_code_dir:
@@ -113,6 +161,7 @@ def _run() -> None:
             len(patterns),
             llm_judgments=llm_judgments,
             llm_model=settings.mindlogic_model,
+            c_pattern_findings=c_pattern_findings,
         )
 
         validate_report(report)

@@ -25,6 +25,7 @@ def draft_similarity_report(
     pattern_count: int,
     llm_judgments: list[LlmJudgment] | None = None,
     llm_model: str | None = None,
+    c_pattern_findings=None,
 ) -> str:
     """Generate a vulnerability prediction report from similarity findings."""
 
@@ -34,13 +35,58 @@ def draft_similarity_report(
             f"- 키워드: {keyword}\n- 분석한 소스 파일: {source_count}\n- 비교한 취약점 근거: {pattern_count}",
         ),
         ReportSection("예측 요약", _prediction_summary(findings)),
-        ReportSection("유사도 기반 취약 후보", _finding_table(findings)),
-        ReportSection("해석 방법", _interpretation()),
     ]
+
+    if c_pattern_findings:
+        sections.append(
+            ReportSection(
+                "Static C Pattern Evidence",
+                _c_pattern_table(c_pattern_findings),
+            )
+        )
+
+    sections.extend(
+        [
+            ReportSection("유사도 기반 취약 후보", _finding_table(findings)),
+        ]
+    )
+
     if llm_judgments:
-        sections.insert(3, ReportSection("LLM 재판단", _llm_judgment_table(llm_judgments, llm_model)))
-    sections.insert(-1, ReportSection("근거 CVE", _cve_table(records[:10])))
+        sections.append(
+            ReportSection("LLM 재판단", _llm_judgment_table(llm_judgments, llm_model))
+        )
+
+    sections.extend(
+        [
+            ReportSection("근거 CVE", _cve_table(records[:10])),
+            ReportSection("해석 방법", _interpretation()),
+        ]
+    )
+
     return "\n\n".join(f"## {section.title}\n\n{section.body}" for section in sections)
+
+def _c_pattern_table(c_pattern_findings) -> str:
+    if not c_pattern_findings:
+        return "탐지된 C 코드 패턴 근거가 없습니다."
+
+    rows = [
+        "| Family | CWE | File | Line | Sink | Confidence | Reason |",
+        "| --- | --- | --- | ---: | --- | ---: | --- |",
+    ]
+
+    for finding in c_pattern_findings:
+        cwe = ", ".join(finding.cwe)
+        reason = str(finding.reason).replace("|", "\\|")
+        file_path = str(finding.file_path).replace("|", "\\|")
+        evidence_sink = str(finding.sink).replace("|", "\\|")
+
+        rows.append(
+            f"| {finding.family} | {cwe} | {file_path} | "
+            f"{finding.line_no} | {evidence_sink} | "
+            f"{finding.confidence:.2f} | {reason} |"
+        )
+
+    return "\n".join(rows)
 
 
 def _summary(records: list[CveRecord]) -> str:
