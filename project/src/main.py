@@ -41,13 +41,17 @@ def _run() -> None:
         return
 
     keyword = args.keyword or _infer_keyword_from_github_url(args.github_url)
-    if keyword is None:
-        raise ValueError("Enter a CVE keyword or --github-url.")
 
-    validate_keyword(keyword)
-    payload = NvdCollector(settings.nvd_api_key).search(keyword, args.limit or settings.max_results)
-    records = parse_nvd_payload(payload)
-    ranked_records = rank_by_keyword(records, keyword)
+    ranked_records = []
+
+    if keyword:
+        validate_keyword(keyword)
+        payload = NvdCollector(settings.nvd_api_key).search(
+            keyword,
+            args.limit or settings.max_results,
+        )
+        records = parse_nvd_payload(payload)
+        ranked_records = rank_by_keyword(records, keyword)
 
     if args.source_dir or args.github_url:
         if args.github_url:
@@ -65,11 +69,22 @@ def _run() -> None:
                 "Supported source extensions include .c, .h, .cpp, .py, .js, .ts, .java, .php, .go, .rs, and .rb."
             )
 
-        patterns = patterns_from_cves(ranked_records)
+        patterns = []
 
         if args.vuln_code_dir:
-            patterns = patterns_from_code_dir(Path(args.vuln_code_dir)) + patterns
+            patterns.extend(patterns_from_code_dir(Path(args.vuln_code_dir)))
 
+        # keyword가 있을 때만 CVE 설명문 fallback 사용
+        if ranked_records:
+            patterns.extend(patterns_from_cves(ranked_records))
+
+        if not patterns:
+            raise ValueError(
+                "No vulnerability patterns found. "
+                "Use --vuln-code-dir for code-similarity based CVE matching, "
+                "or provide a keyword for NVD description fallback."
+            )
+                
         findings = find_similar_vulnerable_code(
             patterns=patterns,
             source_files=source_files,
@@ -88,8 +103,10 @@ def _run() -> None:
             base_url=settings.mindlogic_base_url,
         )
 
+        report_keyword = keyword or "code_similarity"
+
         report = draft_similarity_report(
-            keyword,
+            report_keyword,
             ranked_records,
             findings,
             len(source_files),

@@ -74,6 +74,55 @@ STOPWORDS = {
     "with",
 }
 
+def _code_tokens(text: str) -> list[str]:
+    """Normalize code into language-agnostic tokens for similarity matching."""
+    text = re.sub(r"//.*?$|/\*.*?\*/|#.*?$", " ", text, flags=re.MULTILINE | re.DOTALL)
+    text = re.sub(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', " STR ", text)
+    text = re.sub(r"\b\d+\b", " NUM ", text)
+
+    raw_tokens = re.findall(
+        r"[A-Za-z_][A-Za-z0-9_]*|==|!=|<=|>=|&&|\|\||[{}()\[\];,.*+\-/%=<>]",
+        text,
+    )
+
+    normalized = []
+    for token in raw_tokens:
+        if re.match(r"[A-Za-z_][A-Za-z0-9_]*", token):
+            pieces = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", token).replace("_", " ").split()
+            normalized.extend(piece.lower() for piece in pieces if len(piece) > 1)
+        else:
+            normalized.append(token)
+
+    return [token for token in normalized if token not in STOPWORDS]
+
+
+def _ngrams(tokens: list[str], n: int = 5) -> set[tuple[str, ...]]:
+    if len(tokens) < n:
+        return {tuple(tokens)} if tokens else set()
+    return {tuple(tokens[index : index + n]) for index in range(len(tokens) - n + 1)}
+
+
+def _jaccard(left: set, right: set) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _code_similarity(left_text: str, right_text: str) -> float:
+    left_tokens = _code_tokens(left_text)
+    right_tokens = _code_tokens(right_text)
+
+    token_score = _jaccard(set(left_tokens), set(right_tokens))
+    ngram_score = _jaccard(_ngrams(left_tokens, 5), _ngrams(right_tokens, 5))
+    line_score = _line_overlap_score(left_text, right_text)
+
+    # 코드 구조 유사도를 가장 크게 반영
+    return min(
+        1.0,
+        0.25 * token_score
+        + 0.55 * ngram_score
+        + 0.20 * line_score,
+    )
 
 def patterns_from_cves(records: list[CveRecord]) -> list[VulnerabilityPattern]:
     """Use CVE summaries as fallback vulnerability patterns."""
@@ -143,6 +192,7 @@ def find_similar_vulnerable_code(
 
             for pattern, (pattern_text, pattern_counter) in zip(patterns, pattern_vectors):
                 similarity = _weighted_similarity(pattern_counter, snippet_counter)
+
                 if pattern.code:
                     similarity = max(similarity, _line_overlap_score(pattern.code, snippet.text))
 
