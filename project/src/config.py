@@ -24,15 +24,10 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         project_root = Path(__file__).resolve().parents[1]
-
-        # debug code
+        
         env_path = project_root / ".env"
-        print("ENV PATH:", env_path)
-        print("ENV EXISTS:", env_path.exists())
 
         load_dotenv(env_path)
-
-        print("MINDLOGIC_API_KEY LOADED:", bool(os.getenv("MINDLOGIC_API_KEY")))
 
         return cls(
             nvd_api_key=os.getenv("NVD_API_KEY"),

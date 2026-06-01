@@ -194,7 +194,8 @@ def find_similar_vulnerable_code(
                 similarity = _weighted_similarity(pattern_counter, snippet_counter)
 
                 if pattern.code:
-                    similarity = max(similarity, _line_overlap_score(pattern.code, snippet.text))
+                    code_score = _code_similarity(pattern.code, snippet.text)
+                    similarity = max(similarity, code_score)
 
                 if similarity < threshold:
                     continue
