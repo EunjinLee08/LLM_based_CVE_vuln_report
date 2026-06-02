@@ -6,8 +6,10 @@ import math
 import re
 from collections import Counter
 from pathlib import Path
-
+from dataclasses import dataclass
+from math import sqrt
 from src.models import CodeSnippet, CveRecord, SimilarityFinding, SourceFile, VulnerabilityPattern
+from src.collectors.cve_fixes import load_cvefixes_vulnerable_code
 
 
 SOURCE_EXTENSIONS = {
@@ -74,6 +76,48 @@ STOPWORDS = {
     "with",
 }
 
+_KEYWORDS = {
+    "if", "else", "for", "while", "switch", "case", "return",
+    "break", "continue", "sizeof", "struct", "class", "public",
+    "private", "protected", "static", "const", "void", "int",
+    "char", "long", "short", "unsigned", "signed", "float",
+    "double", "bool", "true", "false", "null", "NULL",
+}
+
+_DANGEROUS_APIS = {
+    "strcpy", "strncpy", "strcat", "sprintf", "snprintf",
+    "memcpy", "memmove", "gets", "scanf", "sscanf",
+    "malloc", "calloc", "realloc", "free",
+    "system", "popen", "exec", "eval",
+}
+
+@dataclass(frozen=True)
+class VulnerabilityPattern:
+    pattern_id: str
+    cve_id: str | None
+    cwe_id: str | None
+    source: str
+
+    # 핵심: 설명보다 코드가 중심
+    code: str
+    description: str | None = None
+
+    repo_url: str | None = None
+    commit_hash: str | None = None
+    file_path: str | None = None
+    language: str | None = None
+    
+@dataclass(frozen=True)
+class SimilarityFinding:
+    source_path: str
+    start_line: int
+    end_line: int
+    source_code: str
+    pattern: VulnerabilityPattern
+    score: float
+    reason: str
+    evidence: dict[str, object]
+
 def _code_tokens(text: str) -> list[str]:
     """Normalize code into language-agnostic tokens for similarity matching."""
     text = re.sub(r"//.*?$|/\*.*?\*/|#.*?$", " ", text, flags=re.MULTILINE | re.DOTALL)
@@ -138,6 +182,120 @@ def patterns_from_cves(records: list[CveRecord]) -> list[VulnerabilityPattern]:
         )
         for record in records
     ]
+    
+    
+def strip_comments(code: str) -> str:
+    code = re.sub(r"/\*.*?\*/", " ", code, flags=re.S)
+    code = re.sub(r"//.*", " ", code)
+    code = re.sub(r"#.*", " ", code)
+    return code
+
+
+def tokenize_code(code: str) -> list[str]:
+    code = strip_comments(code)
+    return re.findall(r"[A-Za-z_][A-Za-z0-9_]*|\d+|==|!=|<=|>=|->|[{}()\[\];,.*&=+\-/%<>]", code)
+
+
+def normalize_tokens(tokens: list[str]) -> list[str]:
+    normalized: list[str] = []
+
+    for tok in tokens:
+        if tok in _KEYWORDS:
+            normalized.append(tok)
+        elif tok in _DANGEROUS_APIS:
+            normalized.append(f"API_{tok}")
+        elif re.fullmatch(r"\d+", tok):
+            normalized.append("NUM")
+        elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tok):
+            normalized.append("ID")
+        else:
+            normalized.append(tok)
+
+    return normalized
+
+
+def cosine_similarity(a: list[str], b: list[str]) -> float:
+    ca = Counter(a)
+    cb = Counter(b)
+
+    common = set(ca) & set(cb)
+    numerator = sum(ca[t] * cb[t] for t in common)
+
+    denom_a = sqrt(sum(v * v for v in ca.values()))
+    denom_b = sqrt(sum(v * v for v in cb.values()))
+
+    if denom_a == 0 or denom_b == 0:
+        return 0.0
+
+    return numerator / (denom_a * denom_b)
+
+
+def api_overlap_score(a: list[str], b: list[str]) -> float:
+    apis_a = {t for t in a if t.startswith("API_")}
+    apis_b = {t for t in b if t.startswith("API_")}
+
+    if not apis_a or not apis_b:
+        return 0.0
+
+    return len(apis_a & apis_b) / len(apis_a | apis_b)
+
+
+def code_similarity(target_code: str, vulnerable_code: str) -> tuple[float, dict[str, object]]:
+    target_tokens_raw = tokenize_code(target_code)
+    vuln_tokens_raw = tokenize_code(vulnerable_code)
+
+    target_tokens = normalize_tokens(target_tokens_raw)
+    vuln_tokens = normalize_tokens(vuln_tokens_raw)
+
+    token_score = cosine_similarity(target_tokens, vuln_tokens)
+    api_score = api_overlap_score(target_tokens, vuln_tokens)
+
+    # 초기 버전에서는 token 70%, API overlap 30%
+    final_score = (0.7 * token_score) + (0.3 * api_score)
+
+    evidence = {
+        "token_score": round(token_score, 4),
+        "api_score": round(api_score, 4),
+        "shared_apis": sorted({
+            t.replace("API_", "")
+            for t in set(target_tokens) & set(vuln_tokens)
+            if t.startswith("API_")
+        }),
+    }
+
+    return final_score, evidence
+    
+def patterns_from_cvefixes_db(
+    db_path: Path,
+    *,
+    limit: int | None = None,
+    language: str | None = None,
+) -> list[VulnerabilityPattern]:
+    records = load_cvefixes_vulnerable_code(
+        db_path,
+        limit=limit,
+        language=language,
+    )
+
+    patterns: list[VulnerabilityPattern] = []
+
+    for idx, record in enumerate(records):
+        patterns.append(
+            VulnerabilityPattern(
+                pattern_id=f"cvefixes-{record.cve_id}-{idx}",
+                cve_id=record.cve_id,
+                cwe_id=record.cwe_id,
+                source="cvefixes",
+                code=record.vulnerable_code,
+                description=f"Vulnerable code before fix for {record.cve_id}",
+                repo_url=record.repo_url,
+                commit_hash=record.commit_hash,
+                file_path=record.file_path,
+                language=record.language,
+            )
+        )
+
+    return patterns
 
 
 def patterns_from_code_dir(directory: Path) -> list[VulnerabilityPattern]:
@@ -174,46 +332,52 @@ def load_source_files(directory: Path) -> list[SourceFile]:
 
 
 def find_similar_vulnerable_code(
+    source_snippets: list,
     patterns: list[VulnerabilityPattern],
-    source_files: list[SourceFile],
+    *,
     threshold: float = 0.18,
     max_findings: int = 20,
 ) -> list[SimilarityFinding]:
-    """Rank source snippets by similarity to known vulnerability patterns."""
-
     findings: list[SimilarityFinding] = []
-    pattern_vectors = [(_pattern_text(pattern), _token_counter(_pattern_text(pattern))) for pattern in patterns]
 
-    for source_file in source_files:
-        for snippet in split_source(source_file):
-            snippet_counter = _token_counter(snippet.text)
-            if not snippet_counter:
+    for snippet in source_snippets:
+        for pattern in patterns:
+            if not pattern.code.strip():
                 continue
 
-            for pattern, (pattern_text, pattern_counter) in zip(patterns, pattern_vectors):
-                similarity = _weighted_similarity(pattern_counter, snippet_counter)
+            score, evidence = code_similarity(snippet.code, pattern.code)
 
-                if pattern.code:
-                    code_score = _code_similarity(pattern.code, snippet.text)
-                    similarity = max(similarity, code_score)
+            if score < threshold:
+                continue
 
-                if similarity < threshold:
-                    continue
+            shared_apis = evidence.get("shared_apis") or []
 
-                matched_terms = _matched_terms(pattern_text, snippet.text)
-                findings.append(
-                    SimilarityFinding(
-                        pattern=pattern,
-                        snippet=snippet,
-                        similarity=similarity,
-                        matched_terms=matched_terms,
-                        reason=_reason(matched_terms, pattern.code is not None),
-                    )
+            if shared_apis:
+                reason = (
+                    "Target code is similar to previously vulnerable code. "
+                    f"Shared APIs: {', '.join(shared_apis)}."
+                )
+            else:
+                reason = (
+                    "Target code is similar to previously vulnerable code "
+                    "after token and identifier normalization."
                 )
 
-    findings.sort(key=lambda finding: finding.similarity, reverse=True)
-    return findings[:max_findings]
+            findings.append(
+                SimilarityFinding(
+                    source_path=snippet.path,
+                    start_line=snippet.start_line,
+                    end_line=snippet.end_line,
+                    source_code=snippet.code,
+                    pattern=pattern,
+                    score=score,
+                    reason=reason,
+                    evidence=evidence,
+                )
+            )
 
+    findings.sort(key=lambda f: f.score, reverse=True)
+    return findings[:max_findings]
 
 def split_source(source_file: SourceFile, max_lines: int = 80) -> list[CodeSnippet]:
     """Split code into function-like chunks, falling back to fixed windows."""
